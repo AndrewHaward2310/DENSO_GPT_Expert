@@ -5,6 +5,11 @@ from langchain.document_loaders import PyPDFLoader
 from langchain.embeddings import HuggingFaceEmbeddings
 from pathlib import Path
 import os
+import time
+import shutil
+import fitz
+from langchain.docstore.document import Document
+
 # --- GENERAL SETTINGS ---
 PAGE_TITLE = "DENSO GPT Expert"
 PAGE_ICON = "🤖"
@@ -20,30 +25,47 @@ docs = []
 current_dir = Path(__file__).parent if "__file__" in locals() else Path.cwd()
 storage_dir = current_dir.parent.parent / "storage"
 persist_directory_dir = str(current_dir.parent.parent.joinpath("chroma_db"))
-model = HuggingFaceEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder")
+#model = HuggingFaceEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder") - BKAI
+model = HuggingFaceEmbeddings(model_name='sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
 database = Chroma(persist_directory=persist_directory_dir, embedding_function=model)
 
 ss = st.session_state
 ss.setdefault('debug', {})
 
-def split_documents_into_chunks(docs, chunk_size=800, chunk_overlap=20):
+def split_documents(docs, chunk_size=800, chunk_overlap=20):
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap
     )
 
     # Splitting the documents into chunks
-    chunks = text_splitter.split_documents(docs)
-
-    # Create a Chroma collection from the document chunks
-    Chroma.from_documents(documents=chunks, embedding=model, persist_directory=persist_directory_dir)
+    chunks = text_splitter.create_documents([docs])
 
     return chunks
+
+def insert_pdf_to_db(file_path):
+    pages = fitz.open(file_path)
+    chunks = []
+
+    for page in pages:
+        docs = split_documents(page.get_text().replace('\n', ' '))
+        for doc in docs:
+            chunk = Document(page_content=doc.page_content, metadata={"source": pages.name,"page": page.number})
+            chunks.append(chunk)
+    db2 = Chroma.from_documents(chunks, model, persist_directory=persist_directory_dir)
+    st.write(chunks)
 
 if __name__ == '__main__':
     st.title(PAGE_TITLE)
     st.sidebar.title(f"{PAGE_ICON} {PAGE_TITLE}")
     st.sidebar.write("Welcome to the DENSO GPT Expert")
+
+    # the guild of the chatbot in the sidebar
+    with st.sidebar.expander("ℹ️ About"):
+        st.write("Mục \"UPLOAD\" dùng để upload file PDF lên hệ thống")
+        st.write("Bước 1: Click nút \"Browse files\"  để upload data lên hệ thống")
+        st.write("Bước 2: Click nút \"Save to storage\" để lưu data vào hệ thống")
+        st.write("Mục \"STORAGE\" dùng để xem các file PDF đã upload lên hệ thống")
 
     st.write('## Upload your PDF')
     t1, t2 = st.tabs(['UPLOAD', 'STORAGE'])
@@ -65,17 +87,15 @@ if __name__ == '__main__':
                 if len(files_in_storage) > 0:
                     for file in files_in_storage:
                         file_path = str(storage_dir / file.name)
-                        loader = PyPDFLoader(file_path=file_path)
-                        loaders.append(loader)
-                    for loader in loaders:
-                        docs.extend(loader.load())
-                # Split the documents into chunks
-                chunks = split_documents_into_chunks(docs=docs, chunk_size=800, chunk_overlap=20)
-                st.success("Split documents into chunks")
+                        insert_pdf_to_db(file_path)
+                else:
+                    st.write("No files in storage.")
 
     with t2:
+        persist_directory_dir_db = current_dir.parent.parent / "chroma_db"
+        files_in_storage = list(storage_dir.iterdir())
+        persist_files = list(persist_directory_dir_db.iterdir())
         if storage_dir.exists():
-            files_in_storage = list(storage_dir.iterdir())
             if files_in_storage:
                 st.write("### Files in storage:")
                 for file in files_in_storage:
@@ -84,3 +104,20 @@ if __name__ == '__main__':
                 st.write("No files in storage.")
         else:
             st.write("Storage folder does not exist.")
+        clear_btn = st.button("Clear storage")
+        if clear_btn:
+            with st.spinner("Processing..."):
+                for file in files_in_storage:
+                    os.remove(str(storage_dir / file.name))
+                # for file in persist_files:
+                #     st.write(str(persist_directory_dir_db / file.name))
+                #     os.chmod(str(persist_directory_dir_db / file.name), stat.S_IWRITE)
+                #     os.remove(str(persist_directory_dir_db / file.name))
+                try:
+                    shutil.rmtree(persist_directory_dir_db)
+                except PermissionError:
+                    time.sleep(1)  # Add a delay here
+                    shutil.rmtree(persist_directory_dir_db)
+
+                st.success("Cleared storage")
+                st.write("No files in storage.")
